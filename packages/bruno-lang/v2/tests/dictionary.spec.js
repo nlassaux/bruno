@@ -2,7 +2,7 @@
  * This test file is used to test the dictionary parser.
  */
 
-const parser = require('../src/bruToJson');
+const parser = require('../src/bruToJsonNew');
 
 const assertSingleHeader = (input) => {
   const output = parser(input);

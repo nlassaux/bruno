@@ -1,6 +1,5 @@
 const ohm = require('ohm-js');
 const _ = require('lodash');
-const util = require('util');
 const { outdentString } = require('../../v1/src/utils');
 const newParser = require('./bruToJsonNew');
 

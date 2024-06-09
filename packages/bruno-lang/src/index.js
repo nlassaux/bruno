@@ -1,4 +1,4 @@
-const bruToJsonV2 = require('../v2/src/bruToJson');
+const bruToJsonV2 = require('../v2/src/bruToJsonNew');
 const jsonToBruV2 = require('../v2/src/jsonToBru');
 const bruToEnvJsonV2 = require('../v2/src/envToJson');
 const envJsonToBruV2 = require('../v2/src/jsonToEnv');

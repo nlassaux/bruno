@@ -219,4 +219,14 @@ const grammar = P.alt(
   .many()
   .map((results) => Object.assign({}, ...results));
 
-module.exports = grammar;
+const parser = (input) => {
+  const matchNew = grammar.parse(input);
+
+  if (matchNew.status) {
+    return matchNew.value;
+  } else {
+    throw new Error(`Error parsing the input. ${JSON.stringify(matchNew)}`);
+  }
+};
+
+module.exports = parser;
