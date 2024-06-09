@@ -1,6 +1,229 @@
 const ohm = require('ohm-js');
 const _ = require('lodash');
+const util = require('util');
 const { outdentString } = require('../../v1/src/utils');
+const P = require('parsimmon');
+
+const mapPairListToKeyValPair = (pairList = []) => {
+  if (!pairList || !pairList.length) {
+    return {};
+  }
+
+  return _.merge({}, ...pairList[0]);
+};
+
+const mapPairListToKeyValPairNew = (pairList = []) => {
+  // transforms  [ [ 'name', 'parsings' ], [ 'type', 'http' ], [ 'seq', '1' ] ]
+  // to { name: 'parsings', type: 'http', seq: '1' }
+
+  return pairList.reduce((acc, [key, value]) => {
+    acc[key] = value;
+    return acc;
+  }, {});
+};
+
+const mapPairListToNameValueRecord = (pairList = [], parseEnabled = true) => {
+  // converts [['Authorization', 'Bearer 1.2.3']] to [{name: 'Authorization', value: 'Bearer 1.2.3', enabled: true}]
+  return pairList.map(([name, value]) => {
+    if (!parseEnabled) {
+      return {
+        name,
+        value
+      };
+    }
+
+    let enabled = true;
+    if (name && name.length && name.charAt(0) === '~') {
+      name = name.slice(1);
+      enabled = false;
+    }
+
+    return {
+      name,
+      value,
+      enabled
+    };
+  });
+};
+
+const mapPairListToKeyValPairs = (pairList = [], parseEnabled = true) => {
+  if (!pairList.length) {
+    return [];
+  }
+  return _.map(pairList[0], (pair) => {
+    let name = _.keys(pair)[0];
+    let value = pair[name];
+
+    if (!parseEnabled) {
+      return {
+        name,
+        value
+      };
+    }
+
+    let enabled = true;
+    if (name && name.length && name.charAt(0) === '~') {
+      name = name.slice(1);
+      enabled = false;
+    }
+
+    return {
+      name,
+      value,
+      enabled
+    };
+  });
+};
+
+const mapPairListToKeyValPairsMultipart = (pairList = [], parseEnabled = true) => {
+  const pairs = mapPairListToKeyValPairs(pairList, parseEnabled);
+
+  return pairs.map((pair) => {
+    pair.type = 'text';
+    if (pair.value.startsWith('@file(') && pair.value.endsWith(')')) {
+      let filestr = pair.value.replace(/^@file\(/, '').replace(/\)$/, '');
+      pair.type = 'file';
+      pair.value = filestr.split('|');
+    }
+    return pair;
+  });
+};
+
+// Utility function to skip optional whitespace
+function token(p) {
+  return p.skip(P.optWhitespace);
+}
+
+// Parser for multi-line text blocks
+const multiLineTextBlock = P.seq(P.string("'''"), P.regex(/[^]*?(?=''')/), P.string("'''")).map(
+  ([start, content, end]) => content.trim()
+);
+
+// Parser for key-value pairs
+const key = P.regex(/[^:\n\r]+/).map((x) => x.trim());
+const value = P.alt(
+  multiLineTextBlock,
+  P.regex(/[^\n\r]*/).map((x) => x.trim())
+);
+
+const pair = P.seq(token(key), token(P.string(':')), token(value)).map(([k, _, v]) => ({ [k]: v }));
+
+const pairList = P.sepBy(pair, P.optWhitespace);
+
+const dictionary = token(P.string('{'))
+  .then(pairList)
+  .skip(token(P.string('}')))
+  .map((pairs) => Object.assign({}, ...pairs));
+
+// Parsers for different HTTP methods
+const httpMethods = ['get', 'post', 'put', 'delete', 'patch', 'options', 'head', 'connect', 'trace'].reduce(
+  (parsers, method) => {
+    parsers[method] = token(P.string(method))
+      .then(dictionary)
+      .map((dict) => ({ http: { method, ...mapPairListToKeyValPairNew(Object.entries(dict)) } }));
+    return parsers;
+  },
+  {}
+);
+
+const headers = token(P.string('headers'))
+  .then(dictionary)
+  .map((dict) => ({ headers: mapPairListToNameValueRecord(Object.entries(dict)) }));
+
+const query = token(P.string('query'))
+  .then(dictionary)
+  .map((dict) => ({ query: mapPairListToNameValueRecord(Object.entries(dict)) }));
+
+const processMeta = (dict) => {
+  let metaVal = mapPairListToKeyValPairNew(Object.entries(dict));
+  if (!metaVal.seq) {
+    metaVal.seq = 1;
+  }
+  if (!metaVal.type) {
+    metaVal.type = 'http';
+  }
+  return metaVal;
+};
+
+const meta = token(P.string('meta'))
+  .then(dictionary)
+  .map((dict) => ({ meta: processMeta(dict) }));
+
+const bodies = ['json', 'text', 'xml', 'sparql', 'graphql', 'graphql:vars'].reduce((parsers, type) => {
+  parsers[`body:${type}`] = token(P.string(`body:${type}`))
+    .then(token(P.string('{')))
+    .then(multiLineTextBlock)
+    .skip(token(P.string('}')))
+    .map((content) => ({ body: { [type]: content } }));
+  return parsers;
+}, {});
+
+const bodyFormUrlEncoded = token(P.string('body:form-urlencoded'))
+  .then(dictionary)
+  .map((dict) => ({ body: { formUrlEncoded: dict } }));
+
+const bodyMultipart = token(P.string('body:multipart-form'))
+  .then(dictionary)
+  .map((dict) => ({ body: { multipartForm: dict } }));
+
+const body = token(P.string('body'))
+  .then(token(P.string('{')))
+  .then(multiLineTextBlock)
+  .skip(token(P.string('}')))
+  .map((content) => ({ body: { text: content } }));
+
+const script = ['script:pre-request', 'script:post-response'].reduce((parsers, type) => {
+  parsers[type] = token(P.string(type))
+    .then(token(P.string('{')))
+    .then(multiLineTextBlock)
+    .skip(token(P.string('}')))
+    .map((content) => ({ script: { [type.split(':')[1]]: content } }));
+  return parsers;
+}, {});
+
+const tests = token(P.string('tests'))
+  .then(token(P.string('{')))
+  .then(multiLineTextBlock)
+  .skip(token(P.string('}')))
+  .map((content) => ({ tests: content }));
+
+const docs = token(P.string('docs'))
+  .then(token(P.string('{')))
+  .then(multiLineTextBlock)
+  .skip(token(P.string('}')))
+  .map((content) => ({ docs: content }));
+
+const auths = ['auth:awsv4', 'auth:basic', 'auth:bearer', 'auth:digest', 'auth:oauth2'].reduce((parsers, type) => {
+  parsers[type] = token(P.string(type))
+    .then(dictionary)
+    .map((dict) => ({ auth: { [type.split(':')[1]]: dict } }));
+  return parsers;
+}, {});
+
+const varsAndAssert = ['vars:pre-request', 'vars:post-response', 'assert'].reduce((parsers, type) => {
+  parsers[type] = token(P.string(type))
+    .then(dictionary)
+    .map((dict) => ({ [type.split(':')[0]]: dict }));
+  return parsers;
+}, {});
+
+const grammarNew = P.alt(
+  meta,
+  ...Object.values(httpMethods),
+  headers,
+  query,
+  ...Object.values(bodies),
+  bodyFormUrlEncoded,
+  bodyMultipart,
+  body,
+  ...Object.values(script),
+  tests,
+  docs,
+  ...Object.values(auths),
+  ...Object.values(varsAndAssert)
+)
+  .many()
+  .map((results) => Object.assign({}, ...results));
 
 /**
  * A Bru file is made up of blocks.
@@ -104,61 +327,10 @@ const grammar = ohm.grammar(`Bru {
   docs = "docs" st* "{" nl* textblock tagend
 }`);
 
-const mapPairListToKeyValPairs = (pairList = [], parseEnabled = true) => {
-  if (!pairList.length) {
-    return [];
-  }
-  return _.map(pairList[0], (pair) => {
-    let name = _.keys(pair)[0];
-    let value = pair[name];
-
-    if (!parseEnabled) {
-      return {
-        name,
-        value
-      };
-    }
-
-    let enabled = true;
-    if (name && name.length && name.charAt(0) === '~') {
-      name = name.slice(1);
-      enabled = false;
-    }
-
-    return {
-      name,
-      value,
-      enabled
-    };
-  });
-};
-
-const mapPairListToKeyValPairsMultipart = (pairList = [], parseEnabled = true) => {
-  const pairs = mapPairListToKeyValPairs(pairList, parseEnabled);
-
-  return pairs.map((pair) => {
-    pair.type = 'text';
-    if (pair.value.startsWith('@file(') && pair.value.endsWith(')')) {
-      let filestr = pair.value.replace(/^@file\(/, '').replace(/\)$/, '');
-      pair.type = 'file';
-      pair.value = filestr.split('|');
-    }
-    return pair;
-  });
-};
-
 const concatArrays = (objValue, srcValue) => {
   if (_.isArray(objValue) && _.isArray(srcValue)) {
     return objValue.concat(srcValue);
   }
-};
-
-const mapPairListToKeyValPair = (pairList = []) => {
-  if (!pairList || !pairList.length) {
-    return {};
-  }
-
-  return _.merge({}, ...pairList[0]);
 };
 
 const sem = grammar.createSemantics().addAttribute('ast', {
@@ -584,9 +756,13 @@ const sem = grammar.createSemantics().addAttribute('ast', {
 });
 
 const parser = (input) => {
+  const matchNew = grammarNew.parse(input);
+  console.log(util.inspect(matchNew, true, 4, true));
+
   const match = grammar.match(input);
 
   if (match.succeeded()) {
+    console.log('AST:', sem(match).ast);
     return sem(match).ast;
   } else {
     throw new Error(match.message);
